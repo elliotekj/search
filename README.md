@@ -1,7 +1,7 @@
 # Search
 
 [![Hex.pm Version](http://img.shields.io/hexpm/v/search.svg?style=flat)](https://hex.pm/packages/search)
-[![Docs](https://img.shields.io/badge/Docs-Yes-blue)](https://hexdocs.pm/search)
+[![Docs](https://img.shields.io/badge/Docs-Yes-blue)](https://hexdocs.pm/search/search.html)
 [![Hex.pm License](http://img.shields.io/hexpm/l/search.svg?style=flat)](https://hex.pm/packages/search)
 
 **⚡ Fast full-text search for Elixir**
