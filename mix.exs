@@ -49,7 +49,6 @@ defmodule Search.MixProject do
   defp docs do
     [
       name: "Search",
-      main: "Search",
       source_ref: "v#{@version}",
       canonical: "http://hexdocs.pm/search",
       source_url: @repo_url
