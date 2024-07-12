@@ -21,6 +21,7 @@ for Elixir applications.
 - 🔜 Prefix search
 - 🔜 Fuzzy search
 - 🔜 Auto-suggestion engine
+- 🔜 Weighted fields
 - 🔢 Modern search result ranking algorithm
 - 🔀 Add and remove documents anytime
 
