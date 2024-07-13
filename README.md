@@ -33,7 +33,7 @@ The package can be installed by adding `search` to your list of dependencies in
 ```elixir
 def deps do
   [
-    {:search, "~> 0.1"}
+    {:search, "~> 0.2"}
   ]
 end
 ```
