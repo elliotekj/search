@@ -8,7 +8,7 @@ defmodule Search do
   > 👷 **Warning**
   >
   > This library is built on a solid foundation but is still under heavy
-  > development. I wouldn't currently recommend it be used in production.
+  > development.
 
   ## Features
 
