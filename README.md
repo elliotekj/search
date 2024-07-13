@@ -18,7 +18,7 @@ for Elixir applications.
 
 - 🧠 Memory efficient indexing of documents
 - 🔎 Exact match search
-- 🔜 Prefix search
+- 🏃 Prefix search
 - 🔜 Fuzzy search
 - 🔜 Auto-suggestion engine
 - 🔜 Weighted fields
@@ -76,24 +76,24 @@ You can also remove multiple documents at once:
 
 ### Searching
 
-To search the index, use the `search/2` function with the index and the query
+To search the index, use the `search/3` function with the index and the query
 string:
 
-    Search.search(index, "Elixir")
+    Search.search(index, "Eli", prefix?: true)
     [
       %{
         id: 1,
         matches: %{"elixir" => [:title, :content]},
         fields: %{},
         terms: ["elixir"],
-        score: 2.194907312448878
+        score: 0.7157306453637646
       },
       %{
         id: 2,
         matches: %{"elixir" => [:content]},
         fields: %{},
         terms: ["elixir"],
-        score: 0.6962007371655166
+        score: 0.22702197951049452
       }
     ]
 

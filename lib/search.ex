@@ -14,7 +14,7 @@ defmodule Search do
 
   - 🧠 Memory efficient indexing of documents
   - 🔎 Exact match search
-  - 🔜 Prefix search
+  - 🏃 Prefix search
   - 🔜 Fuzzy search
   - 🔜 Auto-suggestion engine
   - 🔢 Modern search result ranking algorithm
@@ -58,7 +58,7 @@ defmodule Search do
 
   ### Searching
 
-  To search the index, use the `search/2` function with the index and the query
+  To search the index, use the `search/3` function with the index and the query
   string:
 
       Search.search(index, "Elixir")
@@ -332,6 +332,9 @@ defmodule Search do
 
     - `index`: The current index state.
     - `query_string`: The search query string.
+    - `opts`: The search options.
+      - `prefix?`: Whether to perform a prefix search. Defaults to `false`.
+      - `weights`: The weights to use for the search. Defaults to `[prefix: 0.375]`.
 
   ## Returns
 
@@ -357,14 +360,30 @@ defmodule Search do
           matches: %{"elixir" => [:title, :content]}
         }
       ]
+      iex> Search.search(index, "Eli", prefix?: true)
+      [
+        %{
+          id: 1,
+          fields: %{},
+          score: 0.28142811435500303,
+          terms: ["elixir"],
+          matches: %{"elixir" => [:title, :content]}
+        }
+      ]
   """
-  @spec search(Index.t(), String.t()) :: [map()]
-  def search(index, query_string) do
+  @spec search(Index.t(), String.t(), Keyword.t()) :: [map()]
+  def search(index, query_string, opts \\ []) do
+    query_prefixed? = Keyword.get(opts, :prefix?, false)
+    weights = Keyword.get(opts, :weights, [])
+    prefix_weight = Keyword.get(weights, :prefix, 0.375)
+
     terms = tokenize(query_string) |> Enum.map(&process_term/1)
     query_terms = Enum.map(terms, &%{term: &1})
-    raw_results = Enum.flat_map(query_terms, &query_term(index, &1))
+    exact_results = query_exact_terms(index, query_terms)
+    prefixed_results = query_prefixed_terms(query_prefixed?, index, query_terms, prefix_weight)
 
-    raw_results
+    exact_results
+    |> Kernel.++(prefixed_results)
     |> Enum.reduce(%{}, fn {short_id, result}, acc ->
       existing = Map.get(acc, short_id, %{score: 0, terms: [], matches: %{}})
       terms = Enum.uniq(existing.terms ++ result.terms)
@@ -385,9 +404,28 @@ defmodule Search do
     |> Enum.sort_by(& &1.score, :desc)
   end
 
-  defp query_term(index, query_term) do
-    {_, term_data} = Radix.get(index.tree, query_term.term, {query_term.term, %{}})
+  def query_exact_terms(index, query_terms) do
+    Enum.flat_map(query_terms, fn query_term ->
+      {term, term_data} = Radix.get(index.tree, query_term.term, {query_term.term, %{}})
+      query_term(index, term, term_data, 1)
+    end)
+  end
 
+  def query_prefixed_terms(false, _index, _query_terms, _prefix_weight), do: []
+
+  def query_prefixed_terms(true, index, query_terms, prefix_weight) do
+    Enum.flat_map(query_terms, fn query_term ->
+      Radix.more(index.tree, query_term.term, exclude: true)
+      |> Enum.flat_map(fn {term, term_data} ->
+        term_length = String.length(term)
+        distance = term_length - String.length(query_term.term)
+        weight = prefix_weight * term_length / (term_length + 0.3 * distance)
+        query_term(index, term, term_data, weight)
+      end)
+    end)
+  end
+
+  defp query_term(index, term, term_data, term_weight) do
     Enum.reduce(index.fields, %{}, fn {field, field_id}, acc ->
       term_freqs = Map.get(term_data, field_id, %{})
       matching_fields = map_size(term_freqs)
@@ -405,16 +443,17 @@ defmodule Search do
             avg_field_length
           )
 
+        weighted_score = raw_score * term_weight
         result = Map.get(acc, short_id, %{score: 0, terms: [], matches: %{}})
-        score = result.score + raw_score
-        terms = [query_term.term | result.terms] |> Enum.uniq()
+        score = result.score + weighted_score
+        terms = [term | result.terms] |> Enum.uniq()
 
         term_matches =
-          Map.get(result.matches, query_term.term, [])
+          Map.get(result.matches, term, [])
           |> Enum.concat([field])
           |> Enum.uniq()
 
-        matches = Map.put(result.matches, query_term.term, term_matches)
+        matches = Map.put(result.matches, term, term_matches)
 
         Map.put(acc, short_id, %{result | score: score, terms: terms, matches: matches})
       end)

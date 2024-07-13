@@ -248,7 +248,7 @@ defmodule SearchTest do
     end
   end
 
-  describe "search/2" do
+  describe "search/3" do
     test "scores results" do
       index = Search.new(@opts) |> Search.add!(@documents)
       results = Search.search(index, "Elixir")
@@ -308,6 +308,65 @@ defmodule SearchTest do
     test "returns empty array if query is empty string" do
       index = Search.new(@opts) |> Search.add!(@documents)
       assert Search.search(index, "") == []
+    end
+
+    test "finds prefix matches" do
+      index = Search.new(@opts) |> Search.add!(@documents)
+      results = Search.search(index, "Eli", prefix?: true)
+      assert length(results) == 2
+      assert Enum.map(results, & &1.id) == [100, 101]
+      assert Enum.map(results, & &1.score) == [0.7157306453637646, 0.22702197951049452]
+    end
+
+    test "weights prefix matches" do
+      index = Search.new(@opts) |> Search.add!(@documents)
+
+      exact = Search.search(index, "Elixir", prefix?: true)
+      prefix = Search.search(index, "Eli", prefix?: true)
+
+      assert length(exact) == 2
+      assert length(prefix) == 2
+
+      assert Enum.map(exact, & &1.id) == [100, 101]
+      assert Enum.map(prefix, & &1.id) == [100, 101]
+
+      assert Enum.map(exact, & &1.score) == [2.194907312448878, 0.6962007371655166]
+      assert Enum.map(prefix, & &1.score) == [0.7157306453637646, 0.22702197951049452]
+    end
+
+    test "merges exact and prefix matches" do
+      documents = [
+        %{
+          "id" => 100,
+          "title" => "Divina Commedia",
+          "text" => "Nel mezzo del cammin di nostra vita"
+        },
+        %{
+          "id" => 101,
+          "title" => "I Promessi Sposi",
+          "text" => "Quel ramo del lago di Como",
+          "lang" => "it",
+          "category" => "fiction"
+        },
+        %{
+          "id" => 102,
+          "title" => "Vita Nova",
+          "text" => "In quella parte del libro della mia memoria",
+          "category" => "poetry"
+        }
+      ]
+
+      index =
+        Search.new(fields: ["title", "text"], return_field_data: ["lang", "category"])
+        |> Search.add!(documents)
+
+      [doc_1, _doc_2, _doc_3] = results = Search.search(index, "del", prefix?: true)
+
+      assert Enum.count(doc_1.matches) == 2
+
+      assert length(results) == 3
+      assert Enum.map(results, &get_in(&1, [:fields, "lang"])) == [nil, "it", nil]
+      assert Enum.map(results, &get_in(&1, [:fields, "category"])) == ["poetry", "fiction", nil]
     end
   end
 end
