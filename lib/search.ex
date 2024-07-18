@@ -5,18 +5,12 @@ defmodule Search do
   This library provides simple, fast, in-memory full-text search functionality
   for Elixir applications.
 
-  > 👷 **Warning**
-  >
-  > This library is built on a solid foundation but is still under heavy
-  > development.
-
   ## Features
 
   - 🧠 Memory efficient indexing of documents
   - 🔎 Exact match search
   - 🏃 Prefix search
-  - 🔜 Fuzzy search
-  - 🔜 Auto-suggestion engine
+  - 🧩 Fuzzy search
   - 🔢 Modern search result ranking algorithm
   - 🔀 Add and remove documents anytime
 
@@ -31,8 +25,8 @@ defmodule Search do
 
   ### Adding Documents
 
-  To add a document to the index, use the `add/2` function with the index and
-  the document:
+  To add a document to the index, use the `add/2` function with the index and the
+  document:
 
       document = %{id: 1, title: "Elixir", content: "Elixir is a dynamic, functional language."}
       index = Search.add!(index, document)
@@ -47,8 +41,8 @@ defmodule Search do
 
   ### Removing Documents
 
-  To remove a document from the index, use the `remove/2` function with the
-  index and the document:
+  To remove a document from the index, use the `remove/2` function with the index
+  and the document:
 
       index = Search.remove!(index, document)
 
@@ -61,28 +55,29 @@ defmodule Search do
   To search the index, use the `search/3` function with the index and the query
   string:
 
-      Search.search(index, "Elixir")
+      Search.search(index, "web famewrk", prefix?: true, fuzzy?: true)
       [
         %{
-          id: 1,
-          matches: %{"elixir" => [:title, :content]},
+          id: 2,
+          matches: %{"framework" => [:content], "web" => [:content]},
           fields: %{},
-          terms: ["elixir"],
-          score: 2.194907312448878
+          score: 1.6965399945163802,
+          terms: ["web", "framework"]
         },
         %{
-          id: 2,
-          matches: %{"elixir" => [:content]},
+          id: 3,
+          matches: %{"framework" => [:content]},
           fields: %{},
-          terms: ["elixir"],
-          score: 0.6962007371655166
+          score: 0.24367025800793077,
+          terms: ["framework"]
         }
       ]
 
   ## Internals
 
-  The library uses a Radix tree for efficient indexing and retrieval of terms.
-  It also implements the BM25 algorithm for relevance scoring.
+  The library uses a Radix tree for efficient indexing and retrieval of terms. It
+  also implements the BM25 algorithm for relevance scoring and the Levenstein
+  distance algorithm for calculating edit distances.
   """
   use TypedStruct
 
@@ -336,7 +331,7 @@ defmodule Search do
       - `prefix?`: Whether to perform a prefix search. Defaults to `false`.
       - `fuzzy?`: Whether to perform a fuzzy search. Defaults to `false`.
       - `fuzziness`: The fuzziness to use for the fuzzy search; i.e. the maximum edit distance between terms being compared. Defaults to `2`.
-      - `weights`: The weights to use for the search. Defaults to `[prefix: 0.375, fuzzy: 0.45]`.
+      - `weights`: The weights to use for the search ranking. Defaults to `[prefix: 0.375, fuzzy: 0.45]`.
 
   ## Returns
 
@@ -368,6 +363,16 @@ defmodule Search do
           id: 1,
           fields: %{},
           score: 0.28142811435500303,
+          terms: ["elixir"],
+          matches: %{"elixir" => [:title, :content]}
+        }
+      ]
+      iex> Search.search(index, "lixir", fuzzy?: true)
+      [
+        %{
+          id: 1,
+          fields: %{},
+          score: 0.27740771272136017,
           terms: ["elixir"],
           matches: %{"elixir" => [:title, :content]}
         }

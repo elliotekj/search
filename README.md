@@ -9,19 +9,12 @@
 This library provides simple, fast, in-memory full-text search functionality
 for Elixir applications.
 
-> 👷 **Warning**
->
-> This library is built on a solid foundation but is still under heavy
-> development.
-
 ## Features
 
 - 🧠 Memory efficient indexing of documents
 - 🔎 Exact match search
 - 🏃 Prefix search
-- 🔜 Fuzzy search
-- 🔜 Auto-suggestion engine
-- 🔜 Weighted fields
+- 🧩 Fuzzy search
 - 🔢 Modern search result ranking algorithm
 - 🔀 Add and remove documents anytime
 
@@ -79,28 +72,29 @@ You can also remove multiple documents at once:
 To search the index, use the `search/3` function with the index and the query
 string:
 
-    Search.search(index, "Eli", prefix?: true)
+    Search.search(index, "web famewrk", prefix?: true, fuzzy?: true)
     [
       %{
-        id: 1,
-        matches: %{"elixir" => [:title, :content]},
+        id: 2,
+        matches: %{"framework" => [:content], "web" => [:content]},
         fields: %{},
-        terms: ["elixir"],
-        score: 0.7157306453637646
+        score: 1.6965399945163802,
+        terms: ["web", "framework"]
       },
       %{
-        id: 2,
-        matches: %{"elixir" => [:content]},
+        id: 3,
+        matches: %{"framework" => [:content]},
         fields: %{},
-        terms: ["elixir"],
-        score: 0.22702197951049452
+        score: 0.24367025800793077,
+        terms: ["framework"]
       }
     ]
 
 ## Internals
 
-The library uses a Radix tree for efficient indexing and retrieval of terms.
-It also implements the BM25 algorithm for relevance scoring.
+The library uses a Radix tree for efficient indexing and retrieval of terms. It
+also implements the BM25 algorithm for relevance scoring and the Levenstein
+distance algorithm for calculating edit distances.
 
 ## License
 
