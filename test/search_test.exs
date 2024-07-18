@@ -368,5 +368,29 @@ defmodule SearchTest do
       assert Enum.map(results, &get_in(&1, [:fields, "lang"])) == [nil, "it", nil]
       assert Enum.map(results, &get_in(&1, [:fields, "category"])) == ["poetry", "fiction", nil]
     end
+
+    test "finds fuzzy matches" do
+      index = Search.new(@opts) |> Search.add!(@documents)
+      results = Search.search(index, "lixir", fuzzy?: true)
+      assert length(results) == 2
+      assert Enum.map(results, & &1.id) == [100, 101]
+      assert Enum.map(results, & &1.score) == [0.705505921858568, 0.22377880837463035]
+    end
+
+    test "only returns fuzzy matches that aren't already exact matches" do
+      index = Search.new(@opts) |> Search.add!(@documents)
+      results = Search.search(index, "Elixir", fuzzy?: true)
+      assert length(results) == 2
+      assert Enum.map(results, & &1.id) == [100, 101]
+      assert Enum.map(results, & &1.score) == [2.194907312448878, 0.6962007371655166]
+    end
+
+    test "only returns fuzzy matches that aren't already prefix matches" do
+      index = Search.new(@opts) |> Search.add!(@documents)
+      fuzzy_results = Search.search(index, "Elixi", prefix?: true, fuzzy?: true, fuzziness: 1)
+      prefix_results = Search.search(index, "Elixi", prefix?: true)
+
+      assert Enum.map(fuzzy_results, & &1.score) == Enum.map(prefix_results, & &1.score)
+    end
   end
 end

@@ -334,7 +334,9 @@ defmodule Search do
     - `query_string`: The search query string.
     - `opts`: The search options.
       - `prefix?`: Whether to perform a prefix search. Defaults to `false`.
-      - `weights`: The weights to use for the search. Defaults to `[prefix: 0.375]`.
+      - `fuzzy?`: Whether to perform a fuzzy search. Defaults to `false`.
+      - `fuzziness`: The fuzziness to use for the fuzzy search; i.e. the maximum edit distance between terms being compared. Defaults to `2`.
+      - `weights`: The weights to use for the search. Defaults to `[prefix: 0.375, fuzzy: 0.45]`.
 
   ## Returns
 
@@ -373,21 +375,29 @@ defmodule Search do
   """
   @spec search(Index.t(), String.t(), Keyword.t()) :: [map()]
   def search(index, query_string, opts \\ []) do
-    query_prefixed? = Keyword.get(opts, :prefix?, false)
+    prefix_search? = Keyword.get(opts, :prefix?, false)
+    fuzzy_search? = Keyword.get(opts, :fuzzy?, false)
     weights = Keyword.get(opts, :weights, [])
     prefix_weight = Keyword.get(weights, :prefix, 0.375)
+    fuzzy_weight = Keyword.get(weights, :fuzzy, 0.45)
+    fuzziness = Keyword.get(opts, :fuzziness, 2)
 
     terms = tokenize(query_string) |> Enum.map(&process_term/1)
     query_terms = Enum.map(terms, &%{term: &1})
-    exact_results = query_exact_terms(index, query_terms)
-    prefixed_results = query_prefixed_terms(query_prefixed?, index, query_terms, prefix_weight)
 
-    exact_results
-    |> Kernel.++(prefixed_results)
-    |> Enum.reduce(%{}, fn {short_id, result}, acc ->
+    query_exact_terms(index, query_terms)
+    |> query_prefixed_terms(prefix_search?, index, query_terms, prefix_weight)
+    |> query_fuzzy_terms(fuzzy_search?, index, query_terms, fuzzy_weight, fuzziness)
+    |> Enum.reduce(%{}, fn {{short_id, term}, result}, acc ->
       existing = Map.get(acc, short_id, %{score: 0, terms: [], matches: %{}})
-      terms = Enum.uniq(existing.terms ++ result.terms)
-      matches = Map.merge(existing.matches, result.matches)
+      terms = Enum.uniq([term | existing.terms])
+
+      term_matches =
+        Map.get(existing.matches, term, [])
+        |> Kernel.++(result.matches)
+        |> Enum.uniq()
+
+      matches = Map.merge(existing.matches, %{term => term_matches})
 
       Map.put(acc, short_id, %{
         existing
@@ -404,58 +414,103 @@ defmodule Search do
     |> Enum.sort_by(& &1.score, :desc)
   end
 
-  def query_exact_terms(index, query_terms) do
-    Enum.flat_map(query_terms, fn query_term ->
+  defp query_exact_terms(index, query_terms, acc \\ %{}) do
+    Enum.reduce(query_terms, acc, fn query_term, acc ->
       {term, term_data} = Radix.get(index.tree, query_term.term, {query_term.term, %{}})
-      query_term(index, term, term_data, 1)
+      query_term(acc, index, term, term_data, 1)
     end)
   end
 
-  def query_prefixed_terms(false, _index, _query_terms, _prefix_weight), do: []
+  defp query_prefixed_terms(acc, false, _index, _query_terms, _prefix_weight), do: acc
 
-  def query_prefixed_terms(true, index, query_terms, prefix_weight) do
-    Enum.flat_map(query_terms, fn query_term ->
+  defp query_prefixed_terms(acc, true, index, query_terms, prefix_weight) do
+    Enum.reduce(query_terms, acc, fn query_term, acc ->
       Radix.more(index.tree, query_term.term, exclude: true)
-      |> Enum.flat_map(fn {term, term_data} ->
+      |> Enum.reduce(acc, fn {term, term_data}, acc ->
         term_length = String.length(term)
         distance = term_length - String.length(query_term.term)
         weight = prefix_weight * term_length / (term_length + 0.3 * distance)
-        query_term(index, term, term_data, weight)
+        query_term(acc, index, term, term_data, weight)
       end)
     end)
   end
 
-  defp query_term(index, term, term_data, term_weight) do
-    Enum.reduce(index.fields, %{}, fn {field, field_id}, acc ->
+  defp query_fuzzy_terms(acc, false, _index, _query_terms, _fuzzy_weight, _fuzziness), do: acc
+
+  defp query_fuzzy_terms(acc, true, index, query_terms, fuzzy_weight, fuzziness) do
+    opts = [fuzzy_weight: fuzzy_weight, fuzziness: fuzziness]
+    Enum.reduce(query_terms, acc, &query_fuzzy_term(&2, index, &1, opts))
+  end
+
+  defp query_fuzzy_term(acc, index, query_term, opts) do
+    term_length = String.length(query_term.term)
+    min_length = term_length - opts[:fuzziness]
+    max_length = term_length + opts[:fuzziness]
+    weight = opts[:fuzzy_weight] * term_length / (term_length + opts[:fuzziness])
+
+    opts =
+      Keyword.merge(opts,
+        term_length: term_length,
+        min_length: min_length,
+        max_length: max_length,
+        weight: weight
+      )
+
+    Radix.walk(index.tree, acc, &evaluate_nodes(&1, &2, index, query_term, opts))
+  end
+
+  defp evaluate_nodes(acc, {_bit, _left, _right}, _index, _query_term, _opts), do: acc
+
+  defp evaluate_nodes(acc, leaf, index, query_term, opts) do
+    Enum.reduce(leaf, acc, &evaluate_leaf(&1, &2, index, query_term, opts))
+  end
+
+  defp evaluate_leaf({term, term_data}, acc, index, query_term, opts) do
+    min_length = Keyword.get(opts, :min_length)
+    max_length = Keyword.get(opts, :max_length)
+    fuzziness = Keyword.get(opts, :fuzziness)
+
+    with true <- String.length(term) >= min_length and String.length(term) <= max_length,
+         true <- Leven.distance(query_term.term, term) <= fuzziness do
+      weight = Keyword.get(opts, :weight)
+      query_term(acc, index, term, term_data, weight)
+    else
+      _ -> acc
+    end
+  end
+
+  defp query_term(acc, index, term, term_data, term_weight) do
+    Enum.reduce(index.fields, acc, fn {field, field_id}, acc ->
       term_freqs = Map.get(term_data, field_id, %{})
       matching_fields = map_size(term_freqs)
       avg_field_length = index.avg_field_lengths[field_id]
 
       Enum.reduce(term_freqs, acc, fn {short_id, term_freq}, acc ->
-        field_length = Enum.at(index.field_lengths[short_id], field_id)
+        result = Map.get(acc, {short_id, term}, %{score: 0, matches: []})
 
-        raw_score =
-          calc_bm25(
-            term_freq,
-            matching_fields,
-            index.document_count,
-            field_length,
-            avg_field_length
-          )
+        if Enum.member?(result.matches, field) do
+          # The term has already been matched in this field by a preceeding
+          # search type. Search is done from highest to lowest precision, so if
+          # the term has already been matched in this field, we skip.
+          acc
+        else
+          field_length = Enum.at(index.field_lengths[short_id], field_id)
 
-        weighted_score = raw_score * term_weight
-        result = Map.get(acc, short_id, %{score: 0, terms: [], matches: %{}})
-        score = result.score + weighted_score
-        terms = [term | result.terms] |> Enum.uniq()
+          raw_score =
+            calc_bm25(
+              term_freq,
+              matching_fields,
+              index.document_count,
+              field_length,
+              avg_field_length
+            )
 
-        term_matches =
-          Map.get(result.matches, term, [])
-          |> Enum.concat([field])
-          |> Enum.uniq()
+          weighted_score = raw_score * term_weight
+          score = result.score + weighted_score
+          matches = result.matches |> Kernel.++([field]) |> Enum.uniq()
 
-        matches = Map.put(result.matches, term, term_matches)
-
-        Map.put(acc, short_id, %{result | score: score, terms: terms, matches: matches})
+          Map.put(acc, {short_id, term}, %{result | score: score, matches: matches})
+        end
       end)
     end)
   end
@@ -507,7 +562,7 @@ defmodule Search do
 
   defp add_field_length(index, short_id, field_id, length) do
     count = index.document_count - 1
-    field_lengths = Map.get(index.field_lengths, short_id, []) |> Enum.concat([length])
+    field_lengths = Map.get(index.field_lengths, short_id, []) |> Kernel.++([length])
     avg_length = Map.get(index.avg_field_lengths, field_id, 0)
     total_length = avg_length * count + length
     avg_lengths = Map.put(index.avg_field_lengths, field_id, total_length / (count + 1))
