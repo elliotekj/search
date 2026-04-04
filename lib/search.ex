@@ -104,6 +104,16 @@ defmodule Search do
     field :tree, Radix.tree(), default: Radix.new()
     # Document hashes
     field :hashes, map(), default: %{}
+    # BK-tree for fuzzy search (optional)
+    field :bk_tree, any(), default: nil
+    # Tombstoned terms in BK-tree (deleted but not yet rebuilt)
+    field :bk_tombstones, MapSet.t(), default: MapSet.new()
+    # Terms pending insertion into BK-tree
+    field :bk_pending, list(), default: []
+    # Whether to use BK-tree for fuzzy search
+    field :use_bk_tree, boolean(), default: false
+    # Ratio of tombstones to trigger rebuild
+    field :bk_rebuild_threshold, float(), default: 0.3
   end
 
   @doc """
@@ -127,10 +137,14 @@ defmodule Search do
   def new(opts) do
     fields = Keyword.fetch!(opts, :fields) |> Enum.with_index()
     return_fields = Keyword.get(opts, :return_field_data, [])
+    use_bk_tree = Keyword.get(opts, :use_bk_tree, false)
+    bk_rebuild_threshold = Keyword.get(opts, :bk_rebuild_threshold, 0.3)
 
     %Index{
       fields: fields,
-      return_fields: return_fields
+      return_fields: return_fields,
+      use_bk_tree: use_bk_tree,
+      bk_rebuild_threshold: bk_rebuild_threshold
     }
   end
 
@@ -202,9 +216,9 @@ defmodule Search do
     Enum.reduce(index.fields, index, fn {f, field_id}, acc ->
       value = Map.get(document, f)
       tokens = tokenize(value)
-      unique_term_count = tokens |> Enum.uniq() |> length()
+      token_count = length(tokens)
 
-      index = add_field_length(acc, short_id, field_id, unique_term_count)
+      index = add_field_length(acc, short_id, field_id, token_count)
 
       Enum.reduce(tokens, index, fn t, acc ->
         processed_term = process_term(t)
@@ -215,6 +229,19 @@ defmodule Search do
         term_data = Map.put(term_data, field_id, field_index)
         %{acc | tree: Radix.put(acc.tree, processed_term, term_data)}
       end)
+    end)
+    |> then(fn index ->
+      if not index.use_bk_tree or index.bk_tree == nil, do: index, else: %{
+        index
+        | bk_pending: Enum.reduce(index.fields, index.bk_pending, fn {f, _}, pending ->
+            tokens = tokenize(Map.get(document, f))
+            Enum.reduce(tokens, pending, fn t, pending ->
+              term = process_term(t)
+              {_, term_data} = Radix.get(index.tree, term, {term, %{}})
+              [{term, term_data} | pending]
+            end)
+          end)
+      }
     end)
   end
 
@@ -285,9 +312,9 @@ defmodule Search do
       Enum.reduce(index.fields, index, fn {f, field_id}, acc ->
         value = Map.get(document, f)
         tokens = tokenize(value)
-        unique_term_count = tokens |> Enum.uniq() |> length()
+        token_count = length(tokens)
 
-        index = remove_field_length(acc, field_id, unique_term_count)
+        index = remove_field_length(acc, field_id, token_count)
 
         Enum.reduce(tokens, index, fn t, acc ->
           processed_term = process_term(t)
@@ -318,6 +345,18 @@ defmodule Search do
         field_lengths: Map.delete(index.field_lengths, short_id),
         hashes: Map.delete(index.hashes, short_id)
     }
+    |> then(fn index ->
+      if not index.use_bk_tree, do: index, else: %{
+        index
+        | bk_tombstones: Enum.reduce(index.fields, index.bk_tombstones, fn {f, _}, ts ->
+            tokens = tokenize(Map.get(document, f))
+            Enum.reduce(tokens, ts, fn t, ts ->
+              term = process_term(t)
+              if Radix.get(index.tree, term) == nil, do: MapSet.put(ts, term), else: ts
+            end)
+          end)
+      }
+    end)
   end
 
   @doc """
@@ -392,7 +431,7 @@ defmodule Search do
 
     query_exact_terms(index, query_terms)
     |> query_prefixed_terms(prefix_search?, index, query_terms, prefix_weight)
-    |> query_fuzzy_terms(fuzzy_search?, index, query_terms, fuzzy_weight, fuzziness)
+    |> query_fuzzy_terms(fuzzy_search?, maybe_rebuild_bk_tree(index), query_terms, fuzzy_weight, fuzziness)
     |> Enum.reduce(%{}, fn {{short_id, term}, result}, acc ->
       existing = Map.get(acc, short_id, %{score: 0, terms: [], matches: %{}})
       terms = Enum.uniq([term | existing.terms])
@@ -442,9 +481,53 @@ defmodule Search do
 
   defp query_fuzzy_terms(acc, false, _index, _query_terms, _fuzzy_weight, _fuzziness), do: acc
 
+  defp query_fuzzy_terms(acc, true, %Index{use_bk_tree: true} = index, query_terms, fuzzy_weight, fuzziness) do
+    Enum.reduce(query_terms, acc, fn query_term, acc ->
+      term_length = String.length(query_term.term)
+      weight = fuzzy_weight * term_length / (term_length + fuzziness)
+
+      Search.BKTree.query(index.bk_tree, query_term.term, fuzziness, index.bk_tombstones)
+      |> Enum.reduce(acc, fn {term, term_data}, acc ->
+        query_term(acc, index, term, term_data, weight)
+      end)
+    end)
+  end
+
   defp query_fuzzy_terms(acc, true, index, query_terms, fuzzy_weight, fuzziness) do
     opts = [fuzzy_weight: fuzzy_weight, fuzziness: fuzziness]
     Enum.reduce(query_terms, acc, &query_fuzzy_term(&2, index, &1, opts))
+  end
+
+  defp maybe_rebuild_bk_tree(%Index{use_bk_tree: false} = index), do: index
+
+  defp maybe_rebuild_bk_tree(%Index{bk_tree: nil} = index) do
+    %{index | bk_tree: Search.BKTree.build(index.tree), bk_pending: [], bk_tombstones: MapSet.new()}
+  end
+
+  defp maybe_rebuild_bk_tree(%Index{bk_tombstones: ts, bk_rebuild_threshold: thresh} = index) do
+    tree_size = Radix.count(index.tree)
+    if tree_size > 0 and MapSet.size(ts) / tree_size >= thresh do
+      %{index | bk_tree: Search.BKTree.build(index.tree), bk_pending: [], bk_tombstones: MapSet.new()}
+    else
+      flush_bk_pending(index)
+    end
+  end
+
+  defp flush_bk_pending(%Index{bk_pending: []} = index), do: index
+
+  defp flush_bk_pending(%Index{bk_pending: pending, bk_tree: tree, bk_tombstones: ts} = index) do
+    tree =
+      pending
+      |> Enum.uniq_by(&elem(&1, 0))
+      |> Enum.reject(fn {term, _} -> MapSet.member?(ts, term) end)
+      |> Enum.reduce(tree, fn {term, _}, tree ->
+        # Always read fresh term_data from radix tree (source of truth)
+        case Radix.get(index.tree, term) do
+          {_, term_data} -> Search.BKTree.insert(tree, term, term_data)
+          nil -> tree
+        end
+      end)
+    %{index | bk_tree: tree, bk_pending: []}
   end
 
   defp query_fuzzy_term(acc, index, query_term, opts) do
@@ -474,9 +557,10 @@ defmodule Search do
     min_length = Keyword.get(opts, :min_length)
     max_length = Keyword.get(opts, :max_length)
     fuzziness = Keyword.get(opts, :fuzziness)
+    term_len = String.length(term)
 
-    with true <- String.length(term) >= min_length and String.length(term) <= max_length,
-         true <- Leven.distance(query_term.term, term) <= fuzziness do
+    with true <- term_len >= min_length and term_len <= max_length,
+         true <- levenshtein_distance(query_term.term, term) <= fuzziness do
       weight = Keyword.get(opts, :weight)
       query_term(acc, index, term, term_data, weight)
     else
@@ -499,7 +583,7 @@ defmodule Search do
           # the term has already been matched in this field, we skip.
           acc
         else
-          field_length = Enum.at(index.field_lengths[short_id], field_id)
+          field_length = elem(index.field_lengths[short_id], field_id)
 
           raw_score =
             calc_bm25(
@@ -567,7 +651,8 @@ defmodule Search do
 
   defp add_field_length(index, short_id, field_id, length) do
     count = index.document_count - 1
-    field_lengths = Map.get(index.field_lengths, short_id, []) |> Kernel.++([length])
+    existing = Map.get(index.field_lengths, short_id, {})
+    field_lengths = Tuple.insert_at(existing, tuple_size(existing), length)
     avg_length = Map.get(index.avg_field_lengths, field_id, 0)
     total_length = avg_length * count + length
     avg_lengths = Map.put(index.avg_field_lengths, field_id, total_length / (count + 1))
@@ -589,6 +674,32 @@ defmodule Search do
     avg_lengths = Map.put(index.avg_field_lengths, field_id, total_length / (count - 1))
 
     %{index | avg_field_lengths: avg_lengths}
+  end
+
+  @doc false
+  def levenshtein_distance(s, t) when s == t, do: 0
+  def levenshtein_distance("", t), do: String.length(t)
+  def levenshtein_distance(s, ""), do: String.length(s)
+
+  def levenshtein_distance(source, target) do
+    s = String.graphemes(source) |> List.to_tuple()
+    t = String.graphemes(target) |> List.to_tuple()
+    s_len = tuple_size(s)
+    t_len = tuple_size(t)
+    # Initialize first row: 0..t_len
+    row = 0..t_len |> Enum.to_list() |> List.to_tuple()
+
+    Enum.reduce(1..s_len, row, fn i, prev_row ->
+      s_char = elem(s, i - 1)
+
+      Enum.reduce(1..t_len, {i, {}}, fn j, {prev_val, new_row} ->
+        cost = if elem(t, j - 1) == s_char, do: 0, else: 1
+        val = min(min(prev_val + 1, elem(prev_row, j) + 1), elem(prev_row, j - 1) + cost)
+        {val, Tuple.insert_at(new_row, tuple_size(new_row), val)}
+      end)
+      |> then(fn {_, row} -> Tuple.insert_at(row, 0, i) end)
+    end)
+    |> elem(t_len)
   end
 
   defp calc_bm25(term_freq, matching_count, total_count, field_length, avg_field_length) do

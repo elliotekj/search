@@ -27,9 +27,9 @@ defmodule Search.MixProject do
     [
       {:typed_struct, "~> 0.3"},
       {:radix, "~> 0.5"},
-      {:leven, "~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:benchee, "~> 1.0", only: :dev, runtime: false}
     ]
   end
 
