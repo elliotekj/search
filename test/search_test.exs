@@ -163,7 +163,7 @@ defmodule SearchTest do
       assert index.return_field_data == %{2 => %{}, 3 => %{}}
       assert index.return_fields == []
       assert index.avg_field_lengths == %{0 => 1.0, 1 => 7.0}
-      assert index.field_lengths == %{2 => [1, 7], 3 => [1, 7]}
+      assert index.field_lengths == %{2 => {1, 7}, 3 => {1, 7}}
       assert index.fields == [title: 0, content: 1]
 
       assert Search.search(index, "Ruby") == []

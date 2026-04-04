@@ -202,9 +202,9 @@ defmodule Search do
     Enum.reduce(index.fields, index, fn {f, field_id}, acc ->
       value = Map.get(document, f)
       tokens = tokenize(value)
-      unique_term_count = tokens |> Enum.uniq() |> length()
+      token_count = length(tokens)
 
-      index = add_field_length(acc, short_id, field_id, unique_term_count)
+      index = add_field_length(acc, short_id, field_id, token_count)
 
       Enum.reduce(tokens, index, fn t, acc ->
         processed_term = process_term(t)
@@ -285,9 +285,9 @@ defmodule Search do
       Enum.reduce(index.fields, index, fn {f, field_id}, acc ->
         value = Map.get(document, f)
         tokens = tokenize(value)
-        unique_term_count = tokens |> Enum.uniq() |> length()
+        token_count = length(tokens)
 
-        index = remove_field_length(acc, field_id, unique_term_count)
+        index = remove_field_length(acc, field_id, token_count)
 
         Enum.reduce(tokens, index, fn t, acc ->
           processed_term = process_term(t)
@@ -474,9 +474,10 @@ defmodule Search do
     min_length = Keyword.get(opts, :min_length)
     max_length = Keyword.get(opts, :max_length)
     fuzziness = Keyword.get(opts, :fuzziness)
+    term_len = String.length(term)
 
-    with true <- String.length(term) >= min_length and String.length(term) <= max_length,
-         true <- Leven.distance(query_term.term, term) <= fuzziness do
+    with true <- term_len >= min_length and term_len <= max_length,
+         true <- levenshtein_distance(query_term.term, term) <= fuzziness do
       weight = Keyword.get(opts, :weight)
       query_term(acc, index, term, term_data, weight)
     else
@@ -499,7 +500,7 @@ defmodule Search do
           # the term has already been matched in this field, we skip.
           acc
         else
-          field_length = Enum.at(index.field_lengths[short_id], field_id)
+          field_length = elem(index.field_lengths[short_id], field_id)
 
           raw_score =
             calc_bm25(
@@ -567,7 +568,8 @@ defmodule Search do
 
   defp add_field_length(index, short_id, field_id, length) do
     count = index.document_count - 1
-    field_lengths = Map.get(index.field_lengths, short_id, []) |> Kernel.++([length])
+    existing = Map.get(index.field_lengths, short_id, {})
+    field_lengths = Tuple.insert_at(existing, tuple_size(existing), length)
     avg_length = Map.get(index.avg_field_lengths, field_id, 0)
     total_length = avg_length * count + length
     avg_lengths = Map.put(index.avg_field_lengths, field_id, total_length / (count + 1))
@@ -589,6 +591,31 @@ defmodule Search do
     avg_lengths = Map.put(index.avg_field_lengths, field_id, total_length / (count - 1))
 
     %{index | avg_field_lengths: avg_lengths}
+  end
+
+  defp levenshtein_distance(s, t) when s == t, do: 0
+  defp levenshtein_distance("", t), do: String.length(t)
+  defp levenshtein_distance(s, ""), do: String.length(s)
+
+  defp levenshtein_distance(source, target) do
+    s = String.graphemes(source) |> List.to_tuple()
+    t = String.graphemes(target) |> List.to_tuple()
+    s_len = tuple_size(s)
+    t_len = tuple_size(t)
+    # Initialize first row: 0..t_len
+    row = 0..t_len |> Enum.to_list() |> List.to_tuple()
+
+    Enum.reduce(1..s_len, row, fn i, prev_row ->
+      s_char = elem(s, i - 1)
+
+      Enum.reduce(1..t_len, {i, {}}, fn j, {prev_val, new_row} ->
+        cost = if elem(t, j - 1) == s_char, do: 0, else: 1
+        val = min(min(prev_val + 1, elem(prev_row, j) + 1), elem(prev_row, j - 1) + cost)
+        {val, Tuple.insert_at(new_row, tuple_size(new_row), val)}
+      end)
+      |> then(fn {_, row} -> Tuple.insert_at(row, 0, i) end)
+    end)
+    |> elem(t_len)
   end
 
   defp calc_bm25(term_freq, matching_count, total_count, field_length, avg_field_length) do
