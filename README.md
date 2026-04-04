@@ -90,11 +90,27 @@ string:
       }
     ]
 
+### BK-Tree Accelerated Fuzzy Search
+
+For indexes with many unique terms, you can enable a BK-tree to speed up fuzzy
+queries. The BK-tree prunes the search space using precomputed edit distances
+instead of scanning every term:
+
+    index = Search.new(fields: [:title, :content], use_bk_tree: true)
+
+The BK-tree is built lazily on the first fuzzy search and maintained
+incrementally as documents are added or removed. A rebuild is triggered
+automatically when the ratio of deleted terms exceeds a configurable threshold
+(default `0.3`):
+
+    index = Search.new(fields: [:title, :content], use_bk_tree: true, bk_rebuild_threshold: 0.5)
+
 ## Internals
 
 The library uses a Radix tree for efficient indexing and retrieval of terms. It
-also implements the BM25 algorithm for relevance scoring and the Levenstein
-distance algorithm for calculating edit distances.
+also implements the BM25 algorithm for relevance scoring and the Levenshtein
+distance algorithm for calculating edit distances. An optional BK-tree index
+provides efficient fuzzy search by pruning candidates based on edit distance.
 
 ## License
 
